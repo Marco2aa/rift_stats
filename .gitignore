@@ -3,6 +3,8 @@ riot.env
 *.env
 !riot.env.example
 
+pousser_github.bat
+
 # Python / Jupyter
 __pycache__/
 *.pyc
