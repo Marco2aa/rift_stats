@@ -1,0 +1,158 @@
+# Kit NYC Eats : Bases de données du Big Data (M2, novembre 2026)
+#
+# Démarrer (dans ce dossier, depuis un terminal) :
+#   docker compose --profile mongo up -d        MongoDB (3 nœuds) seulement
+#   docker compose --profile redis up -d        Redis + Redis Insight
+#   docker compose --profile postgres up -d     PostgreSQL + pgvector
+#   docker compose --profile python up -d       Python (Jupyter, API, tableau de bord)
+#   docker compose --profile tous up -d         tout (projet du vendredi)
+# Voir ce qui tourne :   docker compose ps
+# Arrêter sans rien perdre :   docker compose --profile tous stop
+# Tout remettre à zéro (efface les bases) :   docker compose --profile tous down -v
+#
+# Interfaces dans le navigateur :
+#   http://localhost:8888   Jupyter (Python)
+#   http://localhost:5540   Redis Insight
+#   http://localhost:8000   API du projet (quand elle est lancée)
+#   http://localhost:8501   tableau de bord du projet (quand il est lancé)
+#
+# Versions figées le 20/10/2026 (voir VERSIONS.md). Mémoire : 3,5 Go au plus pour tout le kit (environ 1 Go en réalité).
+
+name: nyc-eats
+
+x-mongo: &mongo
+  image: mongo:8.0.34
+  command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
+  mem_limit: 600m
+  stop_grace_period: 30s   # un nœud du replica set met plus de 10 s à s'arrêter proprement
+  restart: unless-stopped
+  profiles: ["mongo", "tous"]
+  healthcheck:
+    test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+    interval: 5s
+    timeout: 5s
+    retries: 20
+
+services:
+  mongo1:
+    <<: *mongo
+    container_name: mongo1
+    hostname: mongo1
+    ports: ["27017:27017"]
+    volumes:
+      - mongo1-data:/data/db
+      - ./donnees:/donnees:ro
+      - ./travail:/travail
+
+  mongo2:
+    <<: *mongo
+    container_name: mongo2
+    hostname: mongo2
+    ports: ["27018:27017"]
+    volumes:
+      - mongo2-data:/data/db
+
+  mongo3:
+    <<: *mongo
+    container_name: mongo3
+    hostname: mongo3
+    ports: ["27019:27017"]
+    volumes:
+      - mongo3-data:/data/db
+
+  # Crée le replica set rs0 au premier démarrage, puis s'arrête (normal : « Exited (0) »).
+  mongo-init:
+    image: mongo:8.0.34
+    container_name: mongo-init
+    profiles: ["mongo", "tous"]
+    restart: "no"
+    depends_on:
+      mongo1: { condition: service_healthy }
+      mongo2: { condition: service_healthy }
+      mongo3: { condition: service_healthy }
+    volumes:
+      - ./config/init-replica.js:/init-replica.js:ro
+    command: ["mongosh", "--quiet", "--host", "mongo1", "/init-replica.js"]
+
+  redis:
+    image: redis:8.8.3
+    container_name: redis
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "200mb"]
+    mem_limit: 256m
+    restart: unless-stopped
+    profiles: ["redis", "tous"]
+    ports: ["6379:6379"]
+    volumes:
+      - redis-data:/data
+      - ./donnees:/donnees:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redisinsight:
+    image: redis/redisinsight:3.8.0
+    container_name: redisinsight
+    mem_limit: 256m
+    restart: unless-stopped
+    profiles: ["redis", "tous"]
+    ports: ["5540:5540"]
+    environment:
+      RI_REDIS_HOST: redis
+      RI_REDIS_PORT: "6379"
+      RI_REDIS_ALIAS: "NYC Eats"
+    volumes:
+      - redisinsight-data:/data
+    depends_on:
+      redis: { condition: service_healthy }
+
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg18-trixie
+    container_name: postgres
+    mem_limit: 384m
+    restart: unless-stopped
+    profiles: ["postgres", "tous"]
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_USER: nyc
+      POSTGRES_PASSWORD: nyc
+      POSTGRES_DB: nyceats
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./donnees:/donnees:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "nyc", "-d", "nyceats"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  python:
+    build: ./python
+    image: nyc-eats-python:2026.11
+    pull_policy: build
+    container_name: python
+    mem_limit: 768m
+    restart: unless-stopped
+    profiles: ["python", "tous"]
+    ports:
+      - "8888:8888"
+      - "8000:8000"
+      - "8501:8501"
+    working_dir: /travail
+    environment:
+      MONGO_URI: "mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0"
+      REDIS_URL: "redis://redis:6379/0"
+      POSTGRES_DSN: "postgresql://nyc:nyc@postgres:5432/nyceats"
+    volumes:
+      - ./travail:/travail
+      - ./projet:/projet
+      - ./donnees:/donnees:ro
+
+volumes:
+  mongo1-data:
+  mongo2-data:
+  mongo3-data:
+  redis-data:
+  redisinsight-data:
+  postgres-data:

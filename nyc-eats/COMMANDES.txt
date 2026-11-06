@@ -1,0 +1,49 @@
+KIT NYC EATS : LES COMMANDES DE LA SEMAINE, PRÊTES À COPIER
+============================================================
+
+Copier-coller depuis un PDF coupe parfois une longue commande en deux lignes : copiez plutôt
+depuis ce fichier. Une commande par ligne ; tapez Entrée, attendez la fin, puis la suivante.
+Toutes se tapent dans le terminal (PowerShell sous Windows, Terminal sur Mac), placé dans le
+dossier nyc-eats :
+  Windows : cd $HOME\Documents\nyc-eats
+  Mac     : cd ~/Documents/nyc-eats
+
+
+DÉMARRER, VOIR, ARRÊTER
+-----------------------
+docker compose --profile tous up -d
+docker compose --profile mongo up -d
+docker compose --profile redis up -d
+docker compose --profile postgres up -d
+docker compose --profile python up -d
+docker compose ps -a
+docker compose --profile tous stop
+
+
+OUVRIR LES SHELLS (on en sort avec exit, ou \q pour PostgreSQL)
+---------------------------------------------------------------
+docker exec -it mongo1 mongosh nyceats
+docker exec -it redis redis-cli
+docker exec -it postgres psql -U nyc -d nyceats
+
+
+CHARGER LES DONNÉES (chaque livret dit quand)
+---------------------------------------------
+docker exec mongo1 mongoimport --db nyceats --collection restaurants --drop --file /donnees/mongo/restaurants.json
+docker exec postgres psql -U nyc -d nyceats -f /donnees/postgres/charger_nyceats.sql
+docker exec redis redis-cli FLUSHDB
+docker exec redis sh -c "redis-cli --pipe < /donnees/redis/amorce.txt"
+
+
+LE PROJET (chacune dans son propre terminal ; Ctrl+C pour l'arrêter, Ctrl aussi sur Mac)
+-----------------------------------------------------------------------------------------
+docker exec -it python uvicorn api:app --app-dir /projet --host 0.0.0.0 --port 8000 --reload --reload-dir /projet
+docker exec -it python streamlit run /projet/tableau_de_bord.py --server.address 0.0.0.0 --server.port 8501
+
+
+DANS LE NAVIGATEUR
+------------------
+http://localhost:8888   Jupyter (Python)
+http://localhost:5540   Redis Insight
+http://localhost:8000   API du projet (http://localhost:8000/docs pour la documentation)
+http://localhost:8501   tableau de bord du projet

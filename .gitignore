@@ -1,0 +1,13 @@
+# Clé Riot personnelle : ne jamais la publier
+riot.env
+*.env
+!riot.env.example
+
+# Python / Jupyter
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Système
+.DS_Store
+Thumbs.db

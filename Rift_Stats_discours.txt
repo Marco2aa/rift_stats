@@ -1,0 +1,317 @@
+RIFT STATS : TEXTE DE L'ORAL (environ 10 minutes)
+=================================================
+
+Comment lire ce texte :
+  [DIAPO X]      passer à la diapositive X
+  [DÉMO]         passer sur le navigateur (localhost:8501)
+  (0:00)         temps écoulé conseillé à ce moment-là
+  *mot*          mot sur lequel insister
+  /              petite pause pour respirer
+Les passages techniques sont intégrés au texte. Les questions possibles et leurs réponses sont
+à la fin, après la ligne « FIN DE L'ORAL ».
+
+
+-------------------------------------------------------------------
+[DIAPO 1 : Titre]                                              (0:00)
+-------------------------------------------------------------------
+
+Bonjour à tous.
+
+Notre projet s'appelle *Rift Stats*. C'est un tableau de bord de statistiques pour League of
+Legends, le jeu en ligne de Riot Games.
+
+L'idée tient en une phrase : trois bases de données, et chacune a *un rôle précis*. / MongoDB
+stocke les parties, Redis gère le classement et le cache, et PostgreSQL, avec l'extension pgvector,
+gère les champions et leur similarité.
+
+Et ce ne sont pas des données inventées : il y a en ce moment 538 vraies parties en base, 300
+joueurs classés et 173 champions.
+
+
+-------------------------------------------------------------------
+[DIAPO 2 : Le besoin]                                          (0:30)
+-------------------------------------------------------------------
+
+On est partis de quatre questions qu'un joueur se pose vraiment.
+
+Un : quels champions gagnent en ce moment ? / Deux : qui sont les meilleurs joueurs du serveur ?
+/ Trois : et moi, où j'en suis ? / Et quatre : quel champion ressemble à celui que je joue ?
+
+Chaque question correspond à une métrique du tableau de bord. Le top 10 des champions par taux de
+victoire, c'est une agrégation MongoDB. Le top 10 des joueurs, c'est un ensemble trié Redis. Et
+les champions similaires, c'est une recherche vectorielle dans PostgreSQL.
+
+
+-------------------------------------------------------------------
+[DIAPO 3 : Les données]                                        (1:00)
+-------------------------------------------------------------------
+
+Les données viennent de l'API officielle de Riot, avec trois services.
+
+League-V4 nous donne le classement Challenger du serveur européen, soit 300 joueurs. Account-V1
+nous donne le pseudo des 30 premiers. Et Match-V5 nous donne leurs 20 dernières parties classées :
+au total, 510 parties.
+
+À côté, Data Dragon, le catalogue public de Riot, nous fournit sans clé les 173 champions et
+863 objets du patch 16.22.
+
+La vraie contrainte, c'est le *quota*. La clé de développement est valable 24 heures et
+n'autorise que 100 requêtes toutes les deux minutes. Notre script attend donc 1,25 seconde entre
+deux appels, ce qui fait 0,8 requête par seconde, juste sous la limite. Et si Riot répond quand
+même « erreur 429, trop de requêtes », le script lit l'en-tête *Retry-After*, attend exactement
+le temps demandé, puis reprend. / Résultat : 574 appels, environ un quart d'heure de collecte.
+
+
+-------------------------------------------------------------------
+[DIAPO 4 : L'architecture]                                     (1:45)
+-------------------------------------------------------------------
+
+Voici l'architecture, en deux parties.
+
+En haut, la *lecture*. Le navigateur affiche un tableau de bord Streamlit. Streamlit ne touche
+jamais une base : il appelle une API FastAPI. Et l'API elle-même ne contient aucune requête : elle
+passe par des classes DAO, une par base. / Si demain on change de base, on ne réécrit que la DAO.
+
+En bas, le *chargement*. Deux scripts : collecte_riot.py remplit MongoDB et Redis à partir de
+l'API Riot, et charger_champions.py remplit PostgreSQL à partir de Data Dragon.
+
+Et la flèche en pointillés, en haut à droite : l'API peut aussi interroger Riot *à la demande*,
+quand on cherche un joueur qui n'est pas encore en base. On vous le montrera tout à l'heure.
+
+
+-------------------------------------------------------------------
+[DIAPO 5 : MongoDB, le modèle]                                 (2:45)
+-------------------------------------------------------------------
+
+Passons à MongoDB, le cœur du projet.
+
+Un document égale une partie. Les dix joueurs sont *imbriqués* dans un tableau participants.
+Pourquoi ? Parce qu'on ne lit jamais un joueur sans sa partie : on évite ainsi toute jointure.
+Un document pèse 3,3 kilo-octets en moyenne.
+
+Une partie brute renvoyée par Riot contient plus de mille champs. Nous n'en gardons que *treize*.
+C'est un vrai travail de modélisation.
+
+Trois choix nous tenaient à cœur.
+
+Le premier : l'_id du document, c'est l'identifiant de la partie chez Riot. Et on enregistre avec
+un replace_one en *upsert*. / Conséquence : on peut relancer la collecte dix fois, on n'aura jamais
+de doublon. C'est exactement le problème qu'on avait vu en TP, quand on importait deux fois le même
+fichier.
+
+Le deuxième : on ignore les *remakes*, ces parties annulées en moins de cinq minutes, qui
+fausseraient les taux de victoire. Il y en avait cinq.
+
+Le troisième : un champ origine. Il sépare les parties des Challenger des parties chargées quand
+quelqu'un se cherche dans l'interface. Sinon, en se cherchant, on fausserait les statistiques.
+
+Enfin, on a créé trois *index multiclés*. Un index multiclé, c'est un index posé sur un champ à
+l'intérieur d'un tableau : MongoDB crée une entrée d'index par élément. Grâce à l'index sur
+participants.puuid, retrouver toutes les parties d'un joueur ne demande pas de parcourir toute la
+collection.
+
+
+-------------------------------------------------------------------
+[DIAPO 6 : MongoDB, l'agrégation]                              (4:00)
+-------------------------------------------------------------------
+
+Voici le pipeline qui calcule le taux de victoire.
+
+D'abord un $match qui écarte les parties « recherche ». Puis un *$unwind* sur participants : une
+partie devient dix lignes, une par joueur.
+
+Ensuite, l'astuce : un *double $group*. Le premier regroupe par champion et par rôle, et compte
+les victoires avec un $cond, qui transforme le booléen victoire en 1 ou 0. On trie par nombre de
+parties, puis un second $group regroupe par champion seul et garde, avec $first, le rôle le plus
+joué. / On obtient ainsi le rôle *principal* de chaque champion en une seule requête.
+
+On finit par un $match à 20 parties minimum, un $round pour arrondir, et un tri.
+
+À droite, le vrai résultat : Aurelion Sol, Rell, Zoé, Lulu, tous au-dessus de 60 %.
+
+Nous avons écrit trois autres agrégations.
+
+Un *$bucket* range les parties par tranches de cinq minutes. On découvre qu'Ahri gagne 43 % de
+ses parties courtes, mais 65 % de ses parties de 30 à 35 minutes : c'est un champion de fin de
+partie.
+
+Pour les *matchups*, il faut comparer deux champs *du même document* : même rôle, mais équipe
+différente. Pour ça, on extrait d'abord notre joueur avec $filter et $first, puis on compare avec
+*$expr*, ce qu'un $match classique ne sait pas faire.
+
+Enfin, un *double $unwind*, sur les joueurs puis sur leurs objets, donne les objets les plus achetés.
+
+Et tous ces résultats sont gardés 60 secondes dans Redis : une agrégation n'est recalculée qu'une
+fois par minute au maximum.
+
+
+-------------------------------------------------------------------
+[DIAPO 7 : Redis]                                              (5:15)
+-------------------------------------------------------------------
+
+Redis a deux rôles : le classement et le cache.
+
+Le classement est un *ensemble trié* (ZSET) : le score, ce sont les points de ligue. L'avantage,
+c'est que Redis garde l'ensemble trié à chaque insertion, en temps logarithmique. Le top 10, c'est
+une seule commande, ZREVRANGE 0 9. Et le rang d'un joueur, c'est ZREVRANK.
+
+Pour afficher les dix pseudos, il faut dix HGETALL. Plutôt que dix allers-retours réseau, on les
+envoie dans un *pipeline* Redis : un seul aller-retour pour les dix.
+
+Pour le cache, on applique le patron *cache-aside* : l'API lit d'abord Redis. Si la clé n'existe
+pas, elle calcule dans MongoDB, puis écrit le résultat avec SET et une durée de vie, EX 60.
+
+Un détail dont on est fiers : après une collecte, on vide le cache avec *SCAN* et non avec KEYS.
+KEYS bloque Redis le temps de parcourir toutes les clés ; SCAN les parcourt par petits morceaux
+sans bloquer personne.
+
+Le tout tient dans 320 clés et deux méga-octets de mémoire.
+
+
+-------------------------------------------------------------------
+[DIAPO 8 : PostgreSQL et pgvector]                             (6:00)
+-------------------------------------------------------------------
+
+Dernière base : PostgreSQL, avec l'extension pgvector.
+
+Chaque champion est représenté par un *vecteur à dix dimensions* : six cases à 0 ou 1 pour ses
+classes (mage, tank, assassin…), puis ses quatre notes officielles d'attaque, de défense, de magie
+et de difficulté, ramenées entre 0 et 1.
+
+Pour trouver les champions les plus proches, on trie par l'opérateur *flèche*, <->, qui calcule la
+distance euclidienne entre deux vecteurs. / Pour Ahri, on obtient Aurora et Sylas à distance zéro,
+puis Kassadin et Katarina.
+
+Pourquoi PostgreSQL ici ? Parce que ce sont des données de référence, stables et bien structurées,
+qui ne changent qu'à chaque patch. La table des objets sert aussi à MongoDB : elle donne le nom et
+le prix des objets trouvés dans les parties.
+
+
+-------------------------------------------------------------------
+[DIAPO 9 : L'application, puis DÉMO sur localhost:8501]       (6:45)
+-------------------------------------------------------------------
+
+Voici les six fonctionnalités de l'application. Le plus simple, c'est de vous les montrer.
+
+(Passer sur le navigateur.)
+
+(Montrer le haut de la page.)
+En haut, le badge turquoise indique qu'on lit les vraies données, en direct. Les compteurs
+s'animent en CSS pur : on anime une propriété CSS déclarée comme un entier avec @property, et le
+navigateur fait défiler les nombres tout seul, sans aucun JavaScript.
+
+(Taper « zoe » dans la barre de recherche.)
+La recherche ignore les accents : on tape « zoe », elle trouve Zoé. / Voilà sa fiche : les objets
+clés, la courbe selon la durée de la partie, ses matchups et les champions qui lui ressemblent.
+
+(Taper son propre Riot ID, Pseudo#TAG, puis cliquer sur « Charger ».)
+Maintenant, je me cherche moi-même. Je ne suis évidemment pas Challenger, donc je ne suis pas en
+base. / L'API appelle Riot en direct : mon compte, mon rang, mes quinze dernières parties.
+C'est une route *POST* et pas GET, parce qu'elle écrit dans la base et qu'elle consomme le quota de
+la clé. / Et voilà, en quelques secondes : mon rang, mon taux de victoire, mes champions favoris.
+
+(Ouvrir l'onglet Infra.)
+Enfin, l'onglet Infra interroge les bases en direct : replSetGetStatus pour l'état du replica set,
+$collStats pour la taille de la collection. On voit un primaire et deux secondaires.
+
+
+-------------------------------------------------------------------
+[DIAPO 10 : CP ou AP]                                          (8:45)
+-------------------------------------------------------------------
+
+Et justement, la question CAP.
+
+Pour la lecture, nous avons choisi *AP*. Un taux de victoire vieux de 60 secondes, ou un
+classement en retard de quelques points, ça ne gêne personne. On préfère une réponse un peu
+ancienne à pas de réponse du tout.
+
+Pour l'écriture, en revanche, c'est *CP*. MongoDB confirme une écriture seulement quand deux nœuds
+sur trois l'ont reçue : c'est le « write concern majority », la valeur par défaut depuis MongoDB 5.
+Si le primaire tombe, les deux autres attendent dix secondes, puis élisent un nouveau primaire.
+Pendant ce temps, MongoDB *refuse* d'écrire plutôt que de risquer de perdre une partie.
+
+Notre verdict tient en une phrase : / *une base CP, une lecture AP*.
+
+(Si le temps le permet : « docker stop mongo1 », puis Rafraîchir dans l'onglet Infra.)
+
+
+-------------------------------------------------------------------
+[DIAPO 11 : Limites]                                           (9:30)
+-------------------------------------------------------------------
+
+Pour finir, soyons honnêtes sur les limites.
+
+Notre échantillon est petit. À 20 parties, l'intervalle de confiance d'un taux de victoire fait
+plus ou moins *21 points*. Notre 65 % peut donc aussi bien valoir 44 % que 86 %. La piste : collecter
+davantage, et afficher cet intervalle.
+
+Autres limites : la clé expire toutes les 24 heures, et si Redis tombe, les routes en cache
+échouent. Il faudrait alors lire directement MongoDB.
+
+
+-------------------------------------------------------------------
+[DIAPO 12 : Merci]                                             (9:50)
+-------------------------------------------------------------------
+
+Pour résumer : MongoDB pour les parties, Redis pour le classement et le cache, PostgreSQL pour les
+champions. Trois bases, trois rôles.
+
+Merci de votre attention. Nous sommes prêts pour vos questions.
+
+=================================================
+FIN DE L'ORAL
+=================================================
+
+
+
+QUESTIONS POSSIBLES ET RÉPONSES
+-------------------------------
+
+Q : Pourquoi ne pas tout mettre dans MongoDB ?
+R : On pourrait, mais chaque base fait mieux une chose. Un classement trié qui change souvent,
+    c'est le travail naturel d'un ZSET Redis, en mémoire et en O(log n). Les champions sont un
+    référentiel stable et structuré, et pgvector nous donne la recherche par similarité. Les
+    parties, avec leurs dix joueurs imbriqués, sont un cas d'école pour le modèle document.
+
+Q : Pourquoi imbriquer les joueurs plutôt que faire une collection « joueurs » à part ?
+R : Une partie a toujours exactement dix joueurs, et on les lit toujours ensemble. L'imbrication
+    évite une jointure ($lookup) et garde le document petit (3,3 Ko). On ne sépare que ce qui
+    grossit sans limite, ou ce qu'on lit seul.
+
+Q : Comment évitez-vous les doublons ?
+R : L'_id du document est l'identifiant Riot de la partie (matchId). L'écriture est un
+    replace_one avec upsert=True : si la partie existe, elle est remplacée, sinon elle est créée.
+    Relancer la collecte ne duplique donc rien.
+
+Q : Pourquoi un cache de 60 secondes ?
+R : Les statistiques ne bougent qu'à la collecte. Soixante secondes suffisent pour que
+    l'agrégation ne soit pas recalculée à chaque affichage, tout en restant à jour en moins
+    d'une minute. C'est un compromis entre fraîcheur et charge.
+
+Q : Que se passe-t-il si Redis tombe ?
+R : Aujourd'hui, les routes en cache renvoient une erreur. C'est notre principale limite : la
+    correction consiste à attraper l'erreur Redis et à lire directement MongoDB. Ce serait plus
+    lent, mais l'application resterait disponible, ce qui va dans le sens de notre choix AP.
+
+Q : Que se passe-t-il si mongo1 tombe ?
+R : Les deux autres nœuds élisent un nouveau primaire après le délai d'élection (dix secondes par
+    défaut). L'API se connecte avec l'adresse des trois nœuds et l'option replicaSet=rs0 : le
+    pilote trouve le nouveau primaire tout seul. Les écritures sont refusées pendant l'élection.
+
+Q : Comment fonctionne la recherche d'un joueur dans la base ?
+R : Avec un $regex sur participants.pseudo, insensible à la casse. On échappe d'abord le texte
+    tapé (re.escape) pour qu'un caractère spécial comme un point ne soit pas interprété comme
+    une expression régulière.
+
+Q : Comment savez-vous quels objets sont « finaux » ?
+R : Dans Data Dragon : un objet qui se vend sur la carte de la Faille, qui coûte au moins 900 pièces,
+    qui ne se transforme pas en un autre objet et qui n'est ni un consommable ni une balise.
+    Il en reste 151 sur 863.
+
+Q : La clé Riot est-elle dans le code ?
+R : Non. Elle est dans un fichier riot.env, hors des dossiers rendus, et passée au conteneur avec
+    --env-file. Elle n'apparaît dans aucun fichier du projet.
+
+Q : Et les données personnelles ?
+R : On ne garde que le Riot ID, qui est public, et des statistiques de jeu. Aucun nom réel, aucun
+    e-mail, aucune localisation.

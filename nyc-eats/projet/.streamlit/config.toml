@@ -1,0 +1,8 @@
+# Thème du tableau de bord Rift Stats (lu par Streamlit quand on le lance depuis /projet)
+[theme]
+base = "dark"
+primaryColor = "#C8AA6E"
+backgroundColor = "#0A1428"
+secondaryBackgroundColor = "#111E33"
+textColor = "#E8E2D0"
+font = "sans serif"
